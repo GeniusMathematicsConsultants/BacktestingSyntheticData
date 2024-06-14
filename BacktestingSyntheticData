@@ -1,0 +1,145 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+
+def generate_path(S0, num_points, r, t_step, V, rand, rand_trend, mean, mean_reversion):
+    S = S0*np.ones(num_points)
+    trend = 0
+    for i in range(1, len(S)):
+        trend = trend + rand_trend[i-1]*S[i-1]/2000 - trend/10
+        S[i] = mean_reversion*(mean - S[i-1]) + S[i-1]*np.exp((r - 0.5*V**2)*t_step + np.sqrt(t_step)*V*rand[i-1]) + 0.7*trend
+    
+    return S
+
+# Generate synthetic data
+S0 = 1
+num_points = 100000
+seed = 123
+rs = np.random.RandomState(seed)
+rand = rs.standard_normal(num_points-1)
+rand_trend = rs.standard_normal(num_points-1)
+r=0
+V=0.1
+t_step = 1/365
+mean = 1
+mean_reversion = 0.004
+close = generate_path(S0, num_points, r, t_step, V, rand, rand_trend, mean, mean_reversion)
+
+def moving_avg(close, index, days, alpha):
+    partial = days - np.floor(days)
+    days = int(np.floor(days))
+    
+    weights = [alpha**i for i in range(days)]
+    av_period = list(close[max(index - days + 1, 0): index+1])  
+
+    if partial > 0:
+        weights = [alpha**(days)*partial] + weights
+        av_period = [close[max(index - days, 0)]] + av_period
+
+    return np.average(av_period, weights=weights)
+
+def calculate_strategy(close, short_days, long_days, alpha, start_offset, threshold):
+    strategy = [0]*(len(close) - start_offset)
+    short = [0]*(len(close) - start_offset)
+    long = [0]*(len(close) - start_offset)
+    boughtorsold = 1   
+    for i in range(0, len(close) - start_offset):   
+        short[i] = moving_avg(close, i + start_offset, short_days, alpha)
+        long[i] = moving_avg(close, i + start_offset, long_days, alpha)
+        if short[i] >= long[i]*(1+threshold) and boughtorsold != 1:
+            boughtorsold = 1
+            strategy[i] = 1
+        if short[i] <= long[i]*(1-threshold) and boughtorsold != -1:
+            boughtorsold = -1
+            strategy[i] = -1       
+    return (strategy, short, long)
+                
+def price_strategy(strategy, close, short_days, long_days, alpha, start_offset):
+    cash = 1/close[start_offset]  # Start with one unit of CCY2, converted into CCY1
+    bought = 1
+    for i in range(0, len(close) - start_offset):
+        if strategy[i] == 1:
+            cash = cash/close[i + start_offset]       
+            bought = 1
+        if strategy[i] == -1:   
+            cash = cash*close[i + start_offset]           
+            bought = -1    
+    # Sell at end
+    if bought == 1:
+        cash = cash*close[-1]
+    return cash
+        
+def graph_strategy(close, strategy, short, long, start_offset):
+    x = list(range(0, len(close) - start_offset))
+    plt.figure(0)
+    plt.plot(x, close[start_offset:], label = "Synthetic FX data")
+    plt.plot(x, short, label = "short_av")
+    plt.plot(x, long, label = "long_av")
+    buyidx = []
+    sellidx = []
+    for i in range(len(strategy)):
+        if strategy[i] == 1:
+            buyidx.append(i)
+        elif strategy[i] == -1:
+            sellidx.append(i)
+    marker_height = (1+0.1)*min(close) - 0.1*max(close)
+    plt.scatter(buyidx, [marker_height]*len(buyidx), label = "Buy", marker="|")
+    plt.scatter(sellidx, [marker_height]*len(sellidx), label = "Sell", marker="|")
+    plt.title('Moving average crossover')
+    plt.xlabel('Timestep')
+    plt.ylabel('Price')    
+    plt.legend(loc=1, prop={'size': 6})    
+    #plt.legend()
+
+def plot_param(x, close, start_offset, param_index, param_values):
+    profit = []
+    x2 = x.copy()
+    for value in param_values:
+        x2[param_index] = value
+        short_days = x2[0]
+        long_days = x2[1]
+        alpha = x2[2]
+        threshold = x2[3]        
+        (strat, short, long) =  calculate_strategy(close, short_days, long_days, alpha, start_offset, threshold)
+        profit.append(price_strategy(strat, close, short_days, long_days, alpha, start_offset) - 1)
+    plt.figure(param_index+1)
+    param_names = ["short_days", "long_days", "alpha", "threshold"]
+    name = param_names[param_index]
+    plt.title('Strategy profit vs ' + name)
+    plt.xlabel(name)
+    plt.ylabel('Profit')    
+    plt.plot(param_values, profit, label = "Profit")
+
+def evaluate_params(x, close, start_offset):   
+    short_days = x[0]
+    long_days = x[1]
+    alpha = x[2]
+    threshold = x[3]
+    (strat1, short, long) =  calculate_strategy(close, short_days, long_days, alpha, start_offset, threshold)
+    profit = price_strategy(strat1, close, short_days, long_days, alpha, start_offset)
+    return -profit #Since we minimise
+
+#Initial strategy parameters.
+short_days = 5
+long_days = 30
+alpha = 0.99
+start_offset = 100
+threshold = 0.01
+
+x = [short_days, long_days, alpha, threshold]
+
+#Price strategy
+(strat1, short, long) =  calculate_strategy(close, short_days, long_days, alpha, start_offset, threshold)
+profit = price_strategy(strat1, close, short_days, long_days, alpha, start_offset)
+print("Strategy profit is: " + str(profit - 1))
+print("Buy and hold profit is: " + str(close[-1]/close[start_offset] - 1))
+
+#Graph strategy
+graph_strategy(close, strat1, short, long, start_offset)
+
+#Graph parameter dependence
+plot_param(x, close, start_offset, 2, np.arange(0.7, 1, 0.02))
+plot_param(x, close, start_offset, 3, np.arange(0.01, 0.1, 0.001))
+plot_param(x, close, start_offset, 0, np.arange(2, long_days, 2))
+plot_param(x, close, start_offset, 1, np.arange(short_days, 60, 2))
